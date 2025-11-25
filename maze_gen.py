@@ -3,14 +3,13 @@
 
 from __future__ import annotations
 
+import argparse
 import heapq
 import random
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, Generator, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
-
-import pygame
+from typing import Callable, Dict, Generator, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
 # ---------------------------------------------------------------------------
 # Maze primitives
@@ -510,208 +509,107 @@ ALGORITHMS = {
 
 
 # ---------------------------------------------------------------------------
-# Visualization
+# CLI and visualization orchestration
 # ---------------------------------------------------------------------------
 
 
-def run_pygame_viewer(
-    width_cells: int = 14,
-    height_cells: int = 10,
-    tile_size: int = 24,
-    door_config: Optional[DoorConfig] = None,
+def make_environment(
+    width_cells: int,
+    height_cells: int,
+    door_config: Optional[DoorConfig],
+    rng_seed: Optional[int],
 ):
     maze = Maze(width_cells, height_cells)
-    maze.generate(rng_seed=1, start_x=0, start_y=0)
+    maze.generate(rng_seed=rng_seed, start_x=0, start_y=0)
     start_cell = (0, 0)
     goal_cell = (width_cells - 1, height_cells - 1)
     doors = DoorController(maze, start_cell, goal_cell, door_config)
+    return maze, start_cell, goal_cell, doors
 
-    grid = maze.to_grid()
-    grid_rows = len(grid)
-    grid_cols = len(grid[0])
 
-    pygame.init()
-    view_width = grid_cols * tile_size
-    stats_height = 120
+def build_solver_factories(maze: Maze, start_cell: Tuple[int, int], goal_cell: Tuple[int, int], doors: DoorController):
+    factories: List[Callable[[], SolverVisualizer]] = []
+    for name, (solver_fn, color) in ALGORITHMS.items():
+        def factory(fn=solver_fn, alg_name=name, alg_color=color):
+            return SolverVisualizer(alg_name, alg_color, fn(maze, start_cell, goal_cell, doors))
+        factories.append(factory)
+    return factories
 
-    num_algs = len(ALGORITHMS)
-    num_cols = 3
-    num_rows = (num_algs + num_cols - 1) // num_cols  # ceil division
-    panel_height = grid_rows * tile_size + stats_height
 
-    screen_width = view_width * num_cols
-    screen_height = panel_height * num_rows
+def run_visual_mode(args):
+    from visualizer import MazeVisualizer
 
-    screen = pygame.display.set_mode((screen_width, screen_height))
-    pygame.display.set_caption("Time-dependent Maze Solvers")
-    font = pygame.font.SysFont(None, 18)
-    clock = pygame.time.Clock()
+    maze, start_cell, goal_cell, doors = make_environment(
+        args.width, args.height, build_door_config(args), args.seed
+    )
+    factories = build_solver_factories(maze, start_cell, goal_cell, doors)
+    viewer = MazeVisualizer(
+        maze=maze,
+        doors=doors,
+        solver_factories=factories,
+        start_cell=start_cell,
+        goal_cell=goal_cell,
+        tile_size=args.tile_size,
+        stats_height=120,
+        max_cols=3,
+    )
+    viewer.run()
 
-    def cell_to_grid(x: int, y: int) -> Tuple[int, int]:
-        return 2 * x + 1, 2 * y + 1
 
-    solver_visualizers = [
-        SolverVisualizer(name, color, solver_fn(maze, start_cell, goal_cell, doors))
-        for name, (solver_fn, color) in ALGORITHMS.items()
-    ]
+def consume_solver(generator: Iterator[SolverSnapshot]) -> SolverSnapshot:
+    last = None
+    for snapshot in generator:
+        last = snapshot
+        if snapshot.done:
+            break
+    return last if last is not None else SolverSnapshot(set(), set(), None, [], True, False, 0, 0.0, 0)
 
-    colors = {
-        "wall": (20, 20, 20),
-        "floor": (230, 230, 230),
-        "start": (50, 200, 90),
-        "goal": (210, 60, 60),
-        "door_open": (80, 180, 250),
-        "door_closed": (220, 90, 90),
-    }
 
-    def draw_alpha_rect(surface, color, rect, alpha):
-        overlay = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
-        overlay.fill((*color, alpha))
-        surface.blit(overlay, rect.topleft)
+def run_cli_mode(args):
+    maze, start_cell, goal_cell, doors = make_environment(
+        args.width, args.height, build_door_config(args), args.seed
+    )
+    seed_desc = args.seed if args.seed is not None else "random"
+    print(f"Maze: {args.width}x{args.height} | seed: {seed_desc}")
+    print(f"Doors: {doors.config.count} (deterministic={doors.config.deterministic})")
+    for name, (solver_fn, _) in ALGORITHMS.items():
+        snapshot = consume_solver(solver_fn(maze, start_cell, goal_cell, doors))
+        success = "yes" if snapshot.success else "no"
+        path_length = len(snapshot.path) if snapshot.path else "-"
+        print(f"[{name}] success={success} elapsed={snapshot.elapsed:.3f}s expanded={snapshot.expanded} steps={snapshot.time_step} path_len={path_length}")
 
-    running = True
-    while running:
-        clock.tick(60)
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT or (
-                event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE
-            ):
-                running = False
 
-        for solver in solver_visualizers:
-            solver.advance()
+def prompt_for_mode():
+    response = input("Run visualizer? (y/n): ").strip().lower()
+    return "visual" if response.startswith("y") else "cli"
 
-        screen.fill((10, 10, 10))
 
-        for idx, solver in enumerate(solver_visualizers):
-            col = idx % num_cols
-            row = idx // num_cols
-            offset_x = col * view_width
-            offset_y = row * panel_height
+def build_door_config(args) -> DoorConfig:
+    return DoorConfig(
+        deterministic=args.deterministic,
+        seed=args.seed,
+    )
 
-            # draw maze background
-            for gy, grid_row in enumerate(grid):
-                for gx, value in enumerate(grid_row):
-                    color = colors["floor"] if value == 1 else colors["wall"]
-                    rect = pygame.Rect(
-                        offset_x + gx * tile_size,
-                        offset_y + gy * tile_size,
-                        tile_size,
-                        tile_size,
-                    )
-                    pygame.draw.rect(screen, color, rect)
 
-            snapshot = solver.snapshot
+def parse_args():
+    parser = argparse.ArgumentParser(description="Maze generator/solver with optional visualizer.")
+    parser.add_argument("--mode", choices=["visual", "cli"], help="Choose 'visual' for pygame viewer or 'cli' for text metrics.")
+    parser.add_argument("--width", type=int, default=14, help="Maze width in cells.")
+    parser.add_argument("--height", type=int, default=10, help="Maze height in cells.")
+    parser.add_argument("--tile-size", type=int, default=24, help="Base tile size for visual mode; auto-scales to fit the screen.")
+    parser.add_argument("--seed", type=int, default=None, help="Seed for maze and door generation (default: random).")
+    parser.add_argument("--deterministic", action="store_true", help="Use deterministic door timing.")
+    return parser.parse_args()
 
-            # visited cells
-            for cell in snapshot.visited:
-                gx, gy = cell_to_grid(*cell)
-                rect = pygame.Rect(
-                    offset_x + gx * tile_size,
-                    offset_y + gy * tile_size,
-                    tile_size,
-                    tile_size,
-                )
-                draw_alpha_rect(screen, solver.color, rect, 60)
 
-            # frontier cells
-            for cell in snapshot.frontier:
-                gx, gy = cell_to_grid(*cell)
-                rect = pygame.Rect(
-                    offset_x + gx * tile_size,
-                    offset_y + gy * tile_size,
-                    tile_size,
-                    tile_size,
-                )
-                draw_alpha_rect(screen, solver.color, rect, 110)
-
-            # path cells
-            for cell in snapshot.path:
-                gx, gy = cell_to_grid(*cell)
-                rect = pygame.Rect(
-                    offset_x + gx * tile_size,
-                    offset_y + gy * tile_size,
-                    tile_size,
-                    tile_size,
-                )
-                draw_alpha_rect(screen, solver.color, rect, 180)
-
-            # current cell
-            if snapshot.current:
-                gx, gy = cell_to_grid(*snapshot.current)
-                rect = pygame.Rect(
-                    offset_x + gx * tile_size,
-                    offset_y + gy * tile_size,
-                    tile_size,
-                    tile_size,
-                )
-                draw_alpha_rect(screen, solver.color, rect, 230)
-
-            # start and goal
-            sx, sy = cell_to_grid(*start_cell)
-            gx, gy = cell_to_grid(*goal_cell)
-            pygame.draw.rect(
-                screen,
-                colors["start"],
-                pygame.Rect(offset_x + sx * tile_size, offset_y + sy * tile_size, tile_size, tile_size),
-            )
-            pygame.draw.rect(
-                screen,
-                colors["goal"],
-                pygame.Rect(offset_x + gx * tile_size, offset_y + gy * tile_size, tile_size, tile_size),
-            )
-
-            # doors
-            for door, is_open in doors.states_at(snapshot.time_step):
-                agx, agy = cell_to_grid(*door.a)
-                bgx, bgy = cell_to_grid(*door.b)
-                dgx = (agx + bgx) // 2
-                dgy = (agy + bgy) // 2
-                rect = pygame.Rect(
-                    offset_x + dgx * tile_size,
-                    offset_y + dgy * tile_size,
-                    tile_size,
-                    tile_size,
-                )
-                draw_alpha_rect(
-                    screen,
-                    colors["door_open" if is_open else "door_closed"],
-                    rect,
-                    160 if is_open else 230,
-                )
-
-            # stats area below each panel
-            stats_rect = pygame.Rect(
-                offset_x,
-                offset_y + grid_rows * tile_size,
-                view_width,
-                stats_height,
-            )
-            pygame.draw.rect(screen, (25, 25, 25), stats_rect)
-
-            lines = [
-                f"{solver.name}",
-                f"elapsed: {snapshot.elapsed:.2f}s",
-                f"success: {snapshot.success}",
-                f"expanded: {snapshot.expanded}",
-                f"time step: {snapshot.time_step}",
-                f"path length: {len(snapshot.path) if snapshot.path else '-'}",
-            ]
-            for i, text in enumerate(lines):
-                surface = font.render(text, True, (235, 235, 235))
-                screen.blit(
-                    surface,
-                    (
-                        offset_x + 8,
-                        offset_y + grid_rows * tile_size + 8 + i * 18,
-                    ),
-                )
-
-        pygame.display.flip()
-
-    pygame.quit()
+def main():
+    args = parse_args()
+    mode = args.mode or prompt_for_mode()
+    if mode == "visual":
+        run_visual_mode(args)
+    else:
+        run_cli_mode(args)
 
 
 if __name__ == "__main__":
-    door_cfg = DoorConfig(deterministic=False, seed=42)
-    run_pygame_viewer(14, 10, 24, door_cfg)
+    main()
