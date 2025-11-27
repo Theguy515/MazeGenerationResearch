@@ -16,6 +16,7 @@ class MazeVisualizer:
         solver_factories,
         start_cell,
         goal_cell,
+        monsters=None,
         tile_size=24,
         stats_height=120,
         max_cols=3,
@@ -25,6 +26,7 @@ class MazeVisualizer:
         self.solver_factories = solver_factories
         self.start_cell = start_cell
         self.goal_cell = goal_cell
+        self.monsters = monsters
         self.tile_size = tile_size
         self.stats_height = stats_height
         self.max_cols = max_cols
@@ -80,6 +82,7 @@ class MazeVisualizer:
             "goal": (210, 60, 60),
             "door_open": (80, 180, 250),
             "door_closed": (220, 90, 90),
+            "monster": (255, 80, 130),
         }
 
         def draw_alpha_rect(surface, color, rect, alpha):
@@ -173,23 +176,35 @@ class MazeVisualizer:
                     pygame.Rect(offset_x + gx * tile_size, offset_y + gy * tile_size, tile_size, tile_size),
                 )
 
-                for door, is_open in self.doors.states_at(snapshot.time_step):
-                    agx, agy = self._cell_to_grid(*door.a)
-                    bgx, bgy = self._cell_to_grid(*door.b)
-                    dgx = (agx + bgx) // 2
-                    dgy = (agy + bgy) // 2
-                    rect = pygame.Rect(
-                        offset_x + dgx * tile_size,
-                        offset_y + dgy * tile_size,
-                        tile_size,
-                        tile_size,
-                    )
-                    draw_alpha_rect(
-                        screen,
-                        colors["door_open" if is_open else "door_closed"],
-                        rect,
-                        160 if is_open else 230,
-                    )
+                if self.doors:
+                    for door, is_open in self.doors.states_at(snapshot.time_step):
+                        agx, agy = self._cell_to_grid(*door.a)
+                        bgx, bgy = self._cell_to_grid(*door.b)
+                        dgx = (agx + bgx) // 2
+                        dgy = (agy + bgy) // 2
+                        rect = pygame.Rect(
+                            offset_x + dgx * tile_size,
+                            offset_y + dgy * tile_size,
+                            tile_size,
+                            tile_size,
+                        )
+                        draw_alpha_rect(
+                            screen,
+                            colors["door_open" if is_open else "door_closed"],
+                            rect,
+                            160 if is_open else 230,
+                        )
+
+                if self.monsters:
+                    for mx, my in self.monsters.positions_at(snapshot.time_step):
+                        gx, gy = self._cell_to_grid(mx, my)
+                        rect = pygame.Rect(
+                            offset_x + gx * tile_size,
+                            offset_y + gy * tile_size,
+                            tile_size,
+                            tile_size,
+                        )
+                        draw_alpha_rect(screen, colors["monster"], rect, 240)
 
                 stats_rect = pygame.Rect(
                     offset_x,

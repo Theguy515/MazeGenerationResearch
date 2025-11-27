@@ -49,7 +49,13 @@ class Maze:
             [Cell(x, y) for x in range(width)] for y in range(height)
         ]
 
-    def generate(self, rng_seed: Optional[int] = None, start_x: int = 0, start_y: int = 0):
+    def generate(
+        self,
+        rng_seed: Optional[int] = None,
+        start_x: int = 0,
+        start_y: int = 0,
+        extra_links: int = 0,
+    ):
         rng = random.Random(rng_seed)
         stack = [self.cells[start_y][start_x]]
         stack[0].visited = True
@@ -70,6 +76,21 @@ class Maze:
             nxt.walls[OPPOSITE[direction]] = False
             nxt.visited = True
             stack.append(nxt)
+
+        # Add additional corridors to create multiple paths
+        for _ in range(extra_links):
+            y = rng.randrange(self.height)
+            x = rng.randrange(self.width)
+            dirs = list(DIRS.items())
+            rng.shuffle(dirs)
+            for direction, (dx, dy) in dirs:
+                nx, ny = x + dx, y + dy
+                if not within_bounds(self.width, self.height, nx, ny):
+                    continue
+                if self.cells[y][x].walls[direction]:
+                    self.cells[y][x].walls[direction] = False
+                    self.cells[ny][nx].walls[OPPOSITE[direction]] = False
+                    break
 
     def cell_neighbors(self, x: int, y: int) -> List[Tuple[int, int]]:
         return [
@@ -192,6 +213,72 @@ class DoorController:
         return [(door, door.is_open(t)) for door in self.doors]
 
 
+class NullDoorController:
+    def can_traverse(self, src: Tuple[int, int], dst: Tuple[int, int], t: int) -> bool:
+        return True
+
+    def states_at(self, t: int) -> List[Tuple[Door, bool]]:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Monster scheduling
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MonsterConfig:
+    count: int = 1
+    step_interval: int = 1
+    seed: Optional[int] = None
+
+
+class MonsterController:
+    """Simple patrolling monsters that loop along a fixed path."""
+
+    def __init__(
+        self,
+        maze: Maze,
+        start: Tuple[int, int],
+        goal: Tuple[int, int],
+        config: Optional[MonsterConfig] = None,
+    ):
+        self.maze = maze
+        self.start = start
+        self.goal = goal
+        self.config = config or MonsterConfig()
+        self.rng = random.Random(self.config.seed)
+        base_path = static_shortest_path(maze, start, goal)
+        if len(base_path) < 2:
+            base_path = [(0, 0)]
+        patrol = base_path + list(reversed(base_path[1:-1]))  # back and forth loop
+        self.paths: List[List[Tuple[int, int]]] = []
+        for _ in range(self.config.count):
+            self.paths.append(list(patrol))
+
+    def positions_at(self, t: int) -> List[Tuple[int, int]]:
+        positions = []
+        if self.config.step_interval <= 0:
+            return positions
+        for path in self.paths:
+            if not path:
+                continue
+            idx = (t // self.config.step_interval) % len(path)
+            positions.append(path[idx])
+        return positions
+
+    def occupies(self, cell: Tuple[int, int], t: int) -> bool:
+        return cell in self.positions_at(t)
+
+
+class NullMonsterController:
+    def positions_at(self, t: int) -> List[Tuple[int, int]]:
+        return []
+
+    def occupies(self, cell: Tuple[int, int], t: int) -> bool:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Solver utilities
 # ---------------------------------------------------------------------------
@@ -253,8 +340,9 @@ def time_limit(maze: Maze) -> int:
 def time_neighbors(
     maze: Maze,
     state: Tuple[int, int, int],
-    doors: DoorController,
+    doors: Optional[DoorController],
     max_time: int,
+    monsters: Optional["MonsterController"] = None,
 ) -> List[Tuple[int, int, int]]:
     x, y, t = state
     next_t = t + 1
@@ -262,9 +350,13 @@ def time_neighbors(
         return []
     moves = []
     for nx, ny in maze.cell_neighbors(x, y):
-        if doors.can_traverse((x, y), (nx, ny), next_t):
-            moves.append((nx, ny, next_t))
-    moves.append((x, y, next_t))  # wait action
+        if doors and not doors.can_traverse((x, y), (nx, ny), next_t):
+            continue
+        if monsters and monsters.occupies((nx, ny), next_t):
+            continue
+        moves.append((nx, ny, next_t))
+    if not monsters or not monsters.occupies((x, y), next_t):
+        moves.append((x, y, next_t))  # wait action
     return moves
 
 
@@ -309,7 +401,7 @@ class SolverVisualizer:
 # ---------------------------------------------------------------------------
 
 
-def bfs_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], doors: DoorController) -> Generator[SolverSnapshot, None, None]:
+def bfs_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], doors: Optional[DoorController], monsters: Optional["MonsterController"] = None) -> Generator[SolverSnapshot, None, None]:
     start_state = (start[0], start[1], 0)
     q = deque([start_state])
     parent: Dict[Tuple[int, int, int], Tuple[int, int, int]] = {}
@@ -333,7 +425,7 @@ def bfs_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], doors:
             return
         if t >= limit:
             continue
-        for nxt in time_neighbors(maze, current, doors, limit):
+        for nxt in time_neighbors(maze, current, doors, limit, monsters):
             if nxt in visited_states:
                 continue
             visited_states.add(nxt)
@@ -344,7 +436,7 @@ def bfs_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], doors:
     yield SolverSnapshot(set(visited_cells), set(), None, [], True, False, expanded, elapsed, limit)
 
 
-def dfs_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], doors: DoorController) -> Generator[SolverSnapshot, None, None]:
+def dfs_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], doors: Optional[DoorController], monsters: Optional["MonsterController"] = None) -> Generator[SolverSnapshot, None, None]:
     limit = time_limit(maze)
     wait_budget = max(2, (maze.width + maze.height) // 2)
     stack: List[Tuple[int, int, int, int]] = [(start[0], start[1], 0, 0)]
@@ -370,7 +462,9 @@ def dfs_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], doors:
         for nx, ny in reversed(maze.cell_neighbors(x, y)):
             if (nx, ny) in visited_cells:
                 continue
-            if not doors.can_traverse((x, y), (nx, ny), t + 1):
+            if doors and not doors.can_traverse((x, y), (nx, ny), t + 1):
+                continue
+            if monsters and monsters.occupies((nx, ny), t + 1):
                 continue
             visited_cells.add((nx, ny))
             stack.append((nx, ny, t + 1, 0))
@@ -390,7 +484,7 @@ def dfs_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], doors:
     yield SolverSnapshot(set(visited_cells), set(), None, [], True, False, expanded, elapsed, limit)
 
 
-def dijkstra_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], doors: DoorController) -> Generator[SolverSnapshot, None, None]:
+def dijkstra_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], doors: Optional[DoorController], monsters: Optional["MonsterController"] = None) -> Generator[SolverSnapshot, None, None]:
     start_state = (start[0], start[1], 0)
     open_heap: List[Tuple[float, Tuple[int, int, int]]] = [(0.0, start_state)]
     parent: Dict[Tuple[int, int, int], Tuple[int, int, int]] = {}
@@ -416,7 +510,7 @@ def dijkstra_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], d
             return
         if t >= limit:
             continue
-        for nxt in time_neighbors(maze, state, doors, limit):
+        for nxt in time_neighbors(maze, state, doors, limit, monsters):
             new_cost = cost + 1.0
             if new_cost >= g_score.get(nxt, float("inf")):
                 continue
@@ -428,7 +522,7 @@ def dijkstra_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], d
     yield SolverSnapshot(set(visited_cells), set(), None, [], True, False, expanded, elapsed, limit)
 
 
-def astar_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], doors: DoorController) -> Generator[SolverSnapshot, None, None]:
+def astar_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], doors: Optional[DoorController], monsters: Optional["MonsterController"] = None) -> Generator[SolverSnapshot, None, None]:
     start_state = (start[0], start[1], 0)
     open_heap: List[Tuple[float, Tuple[int, int, int]]] = [
         (manhattan(start, goal), start_state)
@@ -457,7 +551,7 @@ def astar_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], door
             return
         if t >= limit:
             continue
-        for nxt in time_neighbors(maze, state, doors, limit):
+        for nxt in time_neighbors(maze, state, doors, limit, monsters):
             tentative_g = g + 1.0
             if tentative_g >= g_score.get(nxt, float("inf")):
                 continue
@@ -470,7 +564,7 @@ def astar_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], door
     yield SolverSnapshot(set(visited_cells), set(), None, [], True, False, expanded, elapsed, limit)
 
 
-def door_wait_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], doors: DoorController) -> Generator[SolverSnapshot, None, None]:
+def door_wait_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], doors: Optional[DoorController], monsters: Optional["MonsterController"] = None) -> Generator[SolverSnapshot, None, None]:
     path = static_shortest_path(maze, start, goal)
     if not path:
         snapshot = SolverSnapshot(set(), set(), None, [], True, False, 0, 0.0, 0)
@@ -495,8 +589,11 @@ def door_wait_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], 
         next_cell = path[idx + 1]
         t += 1
         expanded += 1
-        if doors.can_traverse(current, next_cell, t):
-            idx += 1
+        if doors and not doors.can_traverse(current, next_cell, t):
+            continue
+        if monsters and monsters.occupies(next_cell, t):
+            continue
+        idx += 1
 
 
 ALGORITHMS = {
@@ -518,20 +615,25 @@ def make_environment(
     height_cells: int,
     door_config: Optional[DoorConfig],
     rng_seed: Optional[int],
+    extra_links: int,
+    enable_doors: bool,
+    enable_monsters: bool,
+    monster_config: Optional["MonsterConfig"],
 ):
     maze = Maze(width_cells, height_cells)
-    maze.generate(rng_seed=rng_seed, start_x=0, start_y=0)
+    maze.generate(rng_seed=rng_seed, start_x=0, start_y=0, extra_links=extra_links)
     start_cell = (0, 0)
     goal_cell = (width_cells - 1, height_cells - 1)
-    doors = DoorController(maze, start_cell, goal_cell, door_config)
-    return maze, start_cell, goal_cell, doors
+    doors: Optional[DoorController] = DoorController(maze, start_cell, goal_cell, door_config) if enable_doors else NullDoorController()
+    monsters: Optional["MonsterController"] = MonsterController(maze, start_cell, goal_cell, monster_config) if enable_monsters else NullMonsterController()
+    return maze, start_cell, goal_cell, doors, monsters
 
 
-def build_solver_factories(maze: Maze, start_cell: Tuple[int, int], goal_cell: Tuple[int, int], doors: DoorController):
+def build_solver_factories(maze: Maze, start_cell: Tuple[int, int], goal_cell: Tuple[int, int], doors: Optional[DoorController], monsters: Optional["MonsterController"] = None):
     factories: List[Callable[[], SolverVisualizer]] = []
     for name, (solver_fn, color) in ALGORITHMS.items():
         def factory(fn=solver_fn, alg_name=name, alg_color=color):
-            return SolverVisualizer(alg_name, alg_color, fn(maze, start_cell, goal_cell, doors))
+            return SolverVisualizer(alg_name, alg_color, fn(maze, start_cell, goal_cell, doors, monsters))
         factories.append(factory)
     return factories
 
@@ -539,16 +641,21 @@ def build_solver_factories(maze: Maze, start_cell: Tuple[int, int], goal_cell: T
 def run_visual_mode(args):
     from visualizer import MazeVisualizer
 
-    maze, start_cell, goal_cell, doors = make_environment(
-        args.width, args.height, build_door_config(args), args.seed
+    scenario = args.scenario if args.scenario != "all" else "doors"
+    enable_doors = scenario == "doors"
+    enable_monsters = scenario == "monsters"
+    base_seed = args.seed if args.seed is not None else random.randint(0, 1_000_000_000)
+    maze, start_cell, goal_cell, doors, monsters = make_environment(
+        args.width, args.height, build_door_config(args), base_seed, args.extra_links, enable_doors, enable_monsters, build_monster_config(args)
     )
-    factories = build_solver_factories(maze, start_cell, goal_cell, doors)
+    factories = build_solver_factories(maze, start_cell, goal_cell, doors, monsters)
     viewer = MazeVisualizer(
         maze=maze,
         doors=doors,
         solver_factories=factories,
         start_cell=start_cell,
         goal_cell=goal_cell,
+        monsters=monsters,
         tile_size=args.tile_size,
         stats_height=120,
         max_cols=3,
@@ -566,17 +673,38 @@ def consume_solver(generator: Iterator[SolverSnapshot]) -> SolverSnapshot:
 
 
 def run_cli_mode(args):
-    maze, start_cell, goal_cell, doors = make_environment(
-        args.width, args.height, build_door_config(args), args.seed
-    )
-    seed_desc = args.seed if args.seed is not None else "random"
-    print(f"Maze: {args.width}x{args.height} | seed: {seed_desc}")
-    print(f"Doors: {doors.config.count} (deterministic={doors.config.deterministic})")
-    for name, (solver_fn, _) in ALGORITHMS.items():
-        snapshot = consume_solver(solver_fn(maze, start_cell, goal_cell, doors))
-        success = "yes" if snapshot.success else "no"
-        path_length = len(snapshot.path) if snapshot.path else "-"
-        print(f"[{name}] success={success} elapsed={snapshot.elapsed:.3f}s expanded={snapshot.expanded} steps={snapshot.time_step} path_len={path_length}")
+    scenarios = []
+    if args.scenario in ("all", "static"):
+        scenarios.append(("static", False, False))
+    if args.scenario in ("all", "doors"):
+        scenarios.append(("doors", True, False))
+    if args.scenario in ("all", "monsters"):
+        scenarios.append(("monsters", False, True))
+
+    base_seed = args.seed if args.seed is not None else random.randint(0, 1_000_000_000)
+    seed_desc = args.seed if args.seed is not None else f"random({base_seed})"
+
+    for name, enable_doors, enable_monsters in scenarios:
+        maze, start_cell, goal_cell, doors, monsters = make_environment(
+            args.width,
+            args.height,
+            build_door_config(args),
+            base_seed,
+            args.extra_links,
+            enable_doors,
+            enable_monsters,
+            build_monster_config(args),
+        )
+        print(f"\nScenario: {name} | maze {args.width}x{args.height} | seed: {seed_desc} | extra_links={args.extra_links}")
+        if enable_doors and isinstance(doors, DoorController):
+            print(f"Doors: {doors.config.count} (deterministic={doors.config.deterministic})")
+        if enable_monsters and isinstance(monsters, MonsterController):
+            print(f"Monsters: count={monsters.config.count} step_interval={monsters.config.step_interval}")
+        for alg_name, (solver_fn, _) in ALGORITHMS.items():
+            snapshot = consume_solver(solver_fn(maze, start_cell, goal_cell, doors, monsters))
+            success = "yes" if snapshot.success else "no"
+            path_length = len(snapshot.path) if snapshot.path else "-"
+            print(f"[{alg_name}] success={success} elapsed={snapshot.elapsed:.3f}s expanded={snapshot.expanded} steps={snapshot.time_step} path_len={path_length}")
 
 
 def prompt_for_mode():
@@ -588,17 +716,31 @@ def build_door_config(args) -> DoorConfig:
     return DoorConfig(
         deterministic=args.deterministic,
         seed=args.seed,
+        count=args.door_count,
+    )
+
+
+def build_monster_config(args) -> MonsterConfig:
+    return MonsterConfig(
+        count=args.monster_count,
+        step_interval=args.monster_interval,
+        seed=args.seed,
     )
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Maze generator/solver with optional visualizer.")
     parser.add_argument("--mode", choices=["visual", "cli"], help="Choose 'visual' for pygame viewer or 'cli' for text metrics.")
+    parser.add_argument("--scenario", choices=["all", "static", "doors", "monsters"], default="all", help="Which constraints to run.")
     parser.add_argument("--width", type=int, default=14, help="Maze width in cells.")
     parser.add_argument("--height", type=int, default=10, help="Maze height in cells.")
+    parser.add_argument("--extra-links", type=int, default=6, help="Additional corridors to carve after generation to create multiple paths.")
     parser.add_argument("--tile-size", type=int, default=24, help="Base tile size for visual mode; auto-scales to fit the screen.")
     parser.add_argument("--seed", type=int, default=None, help="Seed for maze and door generation (default: random).")
     parser.add_argument("--deterministic", action="store_true", help="Use deterministic door timing.")
+    parser.add_argument("--door-count", type=int, default=6, help="Number of doors to place when enabled.")
+    parser.add_argument("--monster-count", type=int, default=1, help="Number of patrolling monsters when enabled.")
+    parser.add_argument("--monster-interval", type=int, default=1, help="Monster step interval (time steps between moves).")
     return parser.parse_args()
 
 
