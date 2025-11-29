@@ -1,6 +1,16 @@
-#!/usr/bin/env python3
-"""Research-grade maze solver visualizer with time-dependent doors."""
+#Fall 2025 Algorithm Analysis Project
+#Made by Daniel Wong and Jordan Andrews
+#Maze generation and solvers
+#Runs are done multiple times with different variables on the same mazes
+#A run is done for each algorithm in the following 3 categories:
+#On a normal maze with no doors and no monster
+#A run with time dependent "doors"
+#And lastly a run with a monster that follows the shortest path, essentially blocking the main path at points
 
+#To run this code, open terminal, follow directories to where the files are then run "python3 maze_gen.py"
+#To save multiple runs to a csv file, run "python3 maze_gen.py --mode cli --scenario all --runs 10 --csv-output results.csv"
+#You can increase or decrease the number of runs as you wish in the command
+ 
 from __future__ import annotations
 
 import argparse
@@ -11,9 +21,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Generator, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
-# ---------------------------------------------------------------------------
-# Maze primitives
-# ---------------------------------------------------------------------------
+
 
 DIRS = {
     "N": (0, -1),
@@ -40,7 +48,9 @@ class Cell:
 
 
 class Maze:
-    """Perfect grid maze generated via iterative DFS."""
+#Grid maze generated with DFS generation algorithm
+#This code ensures theres always one path from the start to the finish
+#Then, we punch extra small links through the walls to create two paths from start to finish
 
     def __init__(self, width: int, height: int):
         self.width = width
@@ -77,7 +87,7 @@ class Maze:
             nxt.visited = True
             stack.append(nxt)
 
-        # Add additional corridors to create multiple paths
+        #Delete walls to create more than one path to the end
         for _ in range(extra_links):
             y = rng.randrange(self.height)
             x = rng.randrange(self.width)
@@ -130,9 +140,7 @@ class Maze:
         return grid
 
 
-# ---------------------------------------------------------------------------
-# Door scheduling
-# ---------------------------------------------------------------------------
+#Time intervals for doors
 
 @dataclass(frozen=True)
 class Door:
@@ -149,7 +157,7 @@ class Door:
         return (t + self.offset) % self.cycle() < self.open_duration
 
     def key(self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
-        return tuple(sorted((self.a, self.b)))  # type: ignore[return-value]
+        return tuple(sorted((self.a, self.b)))
 
 
 @dataclass
@@ -164,8 +172,8 @@ class DoorConfig:
 
 
 class DoorController:
-    """Places and evaluates time-dependent doors along maze corridors."""
-
+    #Places time dependent doors along corridors
+    #Each door has an open/closed cycle, at time (t) the edge can only be traversed if a door is at open state
     def __init__(
         self,
         maze: Maze,
@@ -221,10 +229,7 @@ class NullDoorController:
         return []
 
 
-# ---------------------------------------------------------------------------
-# Monster scheduling
-# ---------------------------------------------------------------------------
-
+#Scheduling for monsters along shortest path
 
 @dataclass
 class MonsterConfig:
@@ -234,8 +239,10 @@ class MonsterConfig:
 
 
 class MonsterController:
-    """Simple patrolling monsters that loop along a fixed path."""
 
+    #Controls the patrolling monster
+    #Monsters walk back and forth along the static shortest path from start to goal
+    #Monsters essentially behave as guard patrolling the main corrridor while the solvers run
     def __init__(
         self,
         maze: Maze,
@@ -272,6 +279,7 @@ class MonsterController:
 
 
 class NullMonsterController:
+
     def positions_at(self, t: int) -> List[Tuple[int, int]]:
         return []
 
@@ -279,9 +287,7 @@ class NullMonsterController:
         return False
 
 
-# ---------------------------------------------------------------------------
 # Solver utilities
-# ---------------------------------------------------------------------------
 
 
 def reconstruct_path(parent: Dict[Tuple[int, int], Tuple[int, int]], start, goal):
@@ -329,6 +335,32 @@ def static_shortest_path(maze: Maze, start: Tuple[int, int], goal: Tuple[int, in
     return []
 
 
+def static_shortest_path_forbidden_edge(
+    maze: Maze,
+    start: Tuple[int, int],
+    goal: Tuple[int, int],
+    forbidden_edge: Tuple[Tuple[int, int], Tuple[int, int]],
+) -> List[Tuple[int, int]]:
+    blocked = {tuple(sorted(forbidden_edge))}
+    q = deque([start])
+    parent: Dict[Tuple[int, int], Tuple[int, int]] = {}
+    visited = {start}
+    while q:
+        x, y = q.popleft()
+        if (x, y) == goal:
+            return reconstruct_path(parent, start, goal)
+        for nx, ny in maze.cell_neighbors(x, y):
+            edge = tuple(sorted(((x, y), (nx, ny))))
+            if edge in blocked:
+                continue
+            if (nx, ny) in visited:
+                continue
+            visited.add((nx, ny))
+            parent[(nx, ny)] = (x, y)
+            q.append((nx, ny))
+    return []
+
+
 def manhattan(a: Tuple[int, int], b: Tuple[int, int]) -> int:
     return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
@@ -344,19 +376,32 @@ def time_neighbors(
     max_time: int,
     monsters: Optional["MonsterController"] = None,
 ) -> List[Tuple[int, int, int]]:
+    
+    #Given our x,y,t we return all safe states at time t+1
+
+    #This is how we enforce door timing and monster collisions so all algorithms-
+    # - besides the follower algorithm share the same movement rules
+
     x, y, t = state
     next_t = t + 1
     if next_t > max_time:
         return []
+    monster_pos_t = set(monsters.positions_at(t)) if monsters else set()
+    monster_pos_next = set(monsters.positions_at(next_t)) if monsters else set()
     moves = []
     for nx, ny in maze.cell_neighbors(x, y):
         if doors and not doors.can_traverse((x, y), (nx, ny), next_t):
             continue
-        if monsters and monsters.occupies((nx, ny), next_t):
-            continue
+        if monsters:
+            if (nx, ny) in monster_pos_next:
+                continue  # monster occupies destination
+            if (x, y) in monster_pos_next:
+                continue  # monster moves into our current cell
+            if (nx, ny) in monster_pos_t and (x, y) in monster_pos_next:
+                continue  # swap positions with monster
         moves.append((nx, ny, next_t))
-    if not monsters or not monsters.occupies((x, y), next_t):
-        moves.append((x, y, next_t))  # wait action
+    if not monsters or (x, y) not in monster_pos_next:
+        moves.append((x, y, next_t))  # wait action if monster not moving onto us
     return moves
 
 
@@ -396,12 +441,13 @@ class SolverVisualizer:
                 break
 
 
-# ---------------------------------------------------------------------------
-# Solver generators
-# ---------------------------------------------------------------------------
+#Solver generators
 
 
 def bfs_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], doors: Optional[DoorController], monsters: Optional["MonsterController"] = None) -> Generator[SolverSnapshot, None, None]:
+    
+    #BFS on the time-expanded maze (states are x,y, and t)
+
     start_state = (start[0], start[1], 0)
     q = deque([start_state])
     parent: Dict[Tuple[int, int, int], Tuple[int, int, int]] = {}
@@ -437,6 +483,8 @@ def bfs_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], doors:
 
 
 def dfs_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], doors: Optional[DoorController], monsters: Optional["MonsterController"] = None) -> Generator[SolverSnapshot, None, None]:
+
+    #DFS that explores one path in the time-expanded maze with limited to no waiting
     limit = time_limit(maze)
     wait_budget = max(2, (maze.width + maze.height) // 2)
     stack: List[Tuple[int, int, int, int]] = [(start[0], start[1], 0, 0)]
@@ -459,12 +507,19 @@ def dfs_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], doors:
             continue
 
         moved = False
+        monster_pos_t = set(monsters.positions_at(t)) if monsters else set()
+        monster_pos_next = set(monsters.positions_at(t + 1)) if monsters else set()
+
         for nx, ny in reversed(maze.cell_neighbors(x, y)):
             if (nx, ny) in visited_cells:
                 continue
             if doors and not doors.can_traverse((x, y), (nx, ny), t + 1):
                 continue
-            if monsters and monsters.occupies((nx, ny), t + 1):
+            if monsters and (
+                (nx, ny) in monster_pos_next
+                or (x, y) in monster_pos_next
+                or ((nx, ny) in monster_pos_t and (x, y) in monster_pos_next)
+            ):
                 continue
             visited_cells.add((nx, ny))
             stack.append((nx, ny, t + 1, 0))
@@ -485,6 +540,9 @@ def dfs_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], doors:
 
 
 def dijkstra_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], doors: Optional[DoorController], monsters: Optional["MonsterController"] = None) -> Generator[SolverSnapshot, None, None]:
+
+    #Dijkstra's algorith, on (x,y,t) 
+
     start_state = (start[0], start[1], 0)
     open_heap: List[Tuple[float, Tuple[int, int, int]]] = [(0.0, start_state)]
     parent: Dict[Tuple[int, int, int], Tuple[int, int, int]] = {}
@@ -523,6 +581,9 @@ def dijkstra_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], d
 
 
 def astar_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], doors: Optional[DoorController], monsters: Optional["MonsterController"] = None) -> Generator[SolverSnapshot, None, None]:
+
+    #A* search on (x,y,t) using Manhattan distance on (x,y) as the heuristic
+
     start_state = (start[0], start[1], 0)
     open_heap: List[Tuple[float, Tuple[int, int, int]]] = [
         (manhattan(start, goal), start_state)
@@ -565,9 +626,15 @@ def astar_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], door
 
 
 def door_wait_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], doors: Optional[DoorController], monsters: Optional["MonsterController"] = None) -> Generator[SolverSnapshot, None, None]:
+    
+    #A follower baseline, precomputes the shortest path possible, then follows it
+    #If a door is closed, it waits, if the monster is in front of it and traversing towards the goal, it waits behind
+    #Easily fails monster cases due to no redirecting/detours allowed
+    path_compute_start = time.perf_counter()
     path = static_shortest_path(maze, start, goal)
+    path_compute_elapsed = time.perf_counter() - path_compute_start
     if not path:
-        snapshot = SolverSnapshot(set(), set(), None, [], True, False, 0, 0.0, 0)
+        snapshot = SolverSnapshot(set(), set(), None, [], True, False, 0, path_compute_elapsed, 0)
         yield snapshot
         return
 
@@ -575,9 +642,16 @@ def door_wait_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], 
     t = 0
     expanded = 0
     visited: Set[Tuple[int, int]] = set()
-    start_time = time.perf_counter()
+    start_time = time.perf_counter() - path_compute_elapsed  # include path compute time
 
     while True:
+        monster_pos_t = set(monsters.positions_at(t)) if monsters else set()
+        monster_pos_next = set(monsters.positions_at(t + 1)) if monsters else set()
+
+        if monsters and t > 0 and path[idx] in monster_pos_t:
+            elapsed = time.perf_counter() - start_time
+            yield SolverSnapshot(set(visited), set(), path[idx], path[: idx + 1], True, False, expanded, elapsed, t)
+            return
         current = path[idx]
         visited.add(current)
         frontier = {path[idx + 1]} if idx + 1 < len(path) else set()
@@ -591,8 +665,17 @@ def door_wait_solver(maze: Maze, start: Tuple[int, int], goal: Tuple[int, int], 
         expanded += 1
         if doors and not doors.can_traverse(current, next_cell, t):
             continue
-        if monsters and monsters.occupies(next_cell, t):
-            continue
+        if monsters:
+            if next_cell in monster_pos_next:
+                continue
+            if current in monster_pos_next:
+                elapsed = time.perf_counter() - start_time
+                yield SolverSnapshot(set(visited), set(), current, path[: idx + 1], True, False, expanded, elapsed, t)
+                return
+            if (next_cell in monster_pos_t) and (current in monster_pos_next):
+                elapsed = time.perf_counter() - start_time
+                yield SolverSnapshot(set(visited), set(), current, path[: idx + 1], True, False, expanded, elapsed, t)
+                return
         idx += 1
 
 
@@ -605,12 +688,56 @@ ALGORITHMS = {
 }
 
 
-# ---------------------------------------------------------------------------
-# CLI and visualization orchestration
-# ---------------------------------------------------------------------------
+#CLI + visualization
+
+def carve_random_link(maze: Maze, rng: random.Random) -> None:
+    for _ in range(20):
+        y = rng.randrange(maze.height)
+        x = rng.randrange(maze.width)
+        dirs = list(DIRS.items())
+        rng.shuffle(dirs)
+        for direction, (dx, dy) in dirs:
+            nx, ny = x + dx, y + dy
+            if not within_bounds(maze.width, maze.height, nx, ny):
+                continue
+            if maze.cells[y][x].walls[direction]:
+                maze.cells[y][x].walls[direction] = False
+                maze.cells[ny][nx].walls[OPPOSITE[direction]] = False
+                return
+
+
+def ensure_two_distinct_paths(
+        
+    #Carve out extra links until there exists at least a second distinct path
+    #We compute a shortest path then try to block edges, if there exists a path still we keep it -
+    # -if a path doesnt exist we carve another link out then retry
+    maze: Maze,
+    start: Tuple[int, int],
+    goal: Tuple[int, int],
+    rng: random.Random,
+    max_attempts: int = 30,
+) -> None:
+    for _ in range(max_attempts):
+        primary = static_shortest_path(maze, start, goal)
+        if len(primary) < 2:
+            carve_random_link(maze, rng)
+            continue
+        alt = None
+        for i in range(len(primary) - 1):
+            edge = tuple(sorted((primary[i], primary[i + 1])))
+            candidate = static_shortest_path_forbidden_edge(maze, start, goal, edge)
+            if candidate and len(candidate) != len(primary):
+                alt = candidate
+                break
+        if alt:
+            return
+        carve_random_link(maze, rng)
 
 
 def make_environment(
+        
+    #Build the test environment
+
     width_cells: int,
     height_cells: int,
     door_config: Optional[DoorConfig],
@@ -620,10 +747,12 @@ def make_environment(
     enable_monsters: bool,
     monster_config: Optional["MonsterConfig"],
 ):
+    rng = random.Random(rng_seed)
     maze = Maze(width_cells, height_cells)
     maze.generate(rng_seed=rng_seed, start_x=0, start_y=0, extra_links=extra_links)
     start_cell = (0, 0)
     goal_cell = (width_cells - 1, height_cells - 1)
+    ensure_two_distinct_paths(maze, start_cell, goal_cell, rng)
     doors: Optional[DoorController] = DoorController(maze, start_cell, goal_cell, door_config) if enable_doors else NullDoorController()
     monsters: Optional["MonsterController"] = MonsterController(maze, start_cell, goal_cell, monster_config) if enable_monsters else NullMonsterController()
     return maze, start_cell, goal_cell, doors, monsters
@@ -641,26 +770,44 @@ def build_solver_factories(maze: Maze, start_cell: Tuple[int, int], goal_cell: T
 def run_visual_mode(args):
     from visualizer import MazeVisualizer
 
-    scenario = args.scenario if args.scenario != "all" else "doors"
-    enable_doors = scenario == "doors"
-    enable_monsters = scenario == "monsters"
-    base_seed = args.seed if args.seed is not None else random.randint(0, 1_000_000_000)
-    maze, start_cell, goal_cell, doors, monsters = make_environment(
-        args.width, args.height, build_door_config(args), base_seed, args.extra_links, enable_doors, enable_monsters, build_monster_config(args)
-    )
-    factories = build_solver_factories(maze, start_cell, goal_cell, doors, monsters)
-    viewer = MazeVisualizer(
-        maze=maze,
-        doors=doors,
-        solver_factories=factories,
-        start_cell=start_cell,
-        goal_cell=goal_cell,
+    base_seed = args.base_seed if args.base_seed is not None else (args.seed if args.seed is not None else random.randint(0, 1_000_000_000))
+    door_seed = args.door_seed if args.door_seed is not None else base_seed
+    monster_seed = args.monster_seed if args.monster_seed is not None else base_seed
+
+    scenarios = []
+    if args.scenario in ("all", "static"):
+        scenarios.append(("static", False, False))
+    if args.scenario in ("all", "doors"):
+        scenarios.append(("doors", True, False))
+    if args.scenario in ("all", "monsters"):
+        scenarios.append(("monsters", False, True))
+
+    for scenario_name, enable_doors, enable_monsters in scenarios:
+        print(f"Launching visualizer for scenario: {scenario_name}")
+        maze, start_cell, goal_cell, doors, monsters = make_environment(
+            args.width,
+            args.height,
+            build_door_config(args, door_seed),
+            base_seed,
+            args.extra_links,
+            enable_doors,
+            enable_monsters,
+            build_monster_config(args, monster_seed),
+        )
+        factories = build_solver_factories(maze, start_cell, goal_cell, doors, monsters)
+        viewer = MazeVisualizer(
+            maze=maze,
+            doors=doors,
+            solver_factories=factories,
+            start_cell=start_cell,
+            goal_cell=goal_cell,
         monsters=monsters,
         tile_size=args.tile_size,
-        stats_height=120,
+        stats_height=160,
         max_cols=3,
+        title_suffix=f" - {scenario_name}",
     )
-    viewer.run()
+        viewer.run()
 
 
 def consume_solver(generator: Iterator[SolverSnapshot]) -> SolverSnapshot:
@@ -681,30 +828,69 @@ def run_cli_mode(args):
     if args.scenario in ("all", "monsters"):
         scenarios.append(("monsters", False, True))
 
-    base_seed = args.seed if args.seed is not None else random.randint(0, 1_000_000_000)
-    seed_desc = args.seed if args.seed is not None else f"random({base_seed})"
+    rows = []
+    for run_idx in range(args.runs):
+        base_seed = args.base_seed if args.base_seed is not None else (args.seed if args.seed is not None else random.randint(0, 1_000_000_000))
+        door_seed = args.door_seed if args.door_seed is not None else base_seed
+        monster_seed = args.monster_seed if args.monster_seed is not None else base_seed
+        seed_desc = base_seed if args.base_seed or args.seed is not None else f"random({base_seed})"
 
-    for name, enable_doors, enable_monsters in scenarios:
-        maze, start_cell, goal_cell, doors, monsters = make_environment(
-            args.width,
-            args.height,
-            build_door_config(args),
-            base_seed,
-            args.extra_links,
-            enable_doors,
-            enable_monsters,
-            build_monster_config(args),
-        )
-        print(f"\nScenario: {name} | maze {args.width}x{args.height} | seed: {seed_desc} | extra_links={args.extra_links}")
-        if enable_doors and isinstance(doors, DoorController):
-            print(f"Doors: {doors.config.count} (deterministic={doors.config.deterministic})")
-        if enable_monsters and isinstance(monsters, MonsterController):
-            print(f"Monsters: count={monsters.config.count} step_interval={monsters.config.step_interval}")
-        for alg_name, (solver_fn, _) in ALGORITHMS.items():
-            snapshot = consume_solver(solver_fn(maze, start_cell, goal_cell, doors, monsters))
-            success = "yes" if snapshot.success else "no"
-            path_length = len(snapshot.path) if snapshot.path else "-"
-            print(f"[{alg_name}] success={success} elapsed={snapshot.elapsed:.3f}s expanded={snapshot.expanded} steps={snapshot.time_step} path_len={path_length}")
+        for name, enable_doors, enable_monsters in scenarios:
+            maze, start_cell, goal_cell, doors, monsters = make_environment(
+                args.width,
+                args.height,
+                build_door_config(args, door_seed),
+                base_seed,
+                args.extra_links,
+                enable_doors,
+                enable_monsters,
+                build_monster_config(args, monster_seed),
+            )
+            print(f"\nRun {run_idx + 1}/{args.runs} Scenario: {name} | maze {args.width}x{args.height} | base_seed: {seed_desc} | door_seed: {door_seed} | monster_seed: {monster_seed} | extra_links={args.extra_links}")
+            if enable_doors and isinstance(doors, DoorController):
+                print(f"Doors: {doors.config.count} (deterministic={doors.config.deterministic})")
+            if enable_monsters and isinstance(monsters, MonsterController):
+                print(f"Monsters: count={monsters.config.count} step_interval={monsters.config.step_interval}")
+            for alg_name, (solver_fn, _) in ALGORITHMS.items():
+                snapshot = consume_solver(solver_fn(maze, start_cell, goal_cell, doors, monsters))
+                success = "yes" if snapshot.success else "no"
+                path_length = len(snapshot.path) if snapshot.path else "-"
+                print(f"[{alg_name}] success={success} elapsed={snapshot.elapsed:.3f}s expanded={snapshot.expanded} steps={snapshot.time_step} path_len={path_length}")
+                rows.append({
+                    "run": run_idx + 1,
+                    "scenario": name,
+                    "base_seed": base_seed,
+                    "door_seed": door_seed if enable_doors else "",
+                    "monster_seed": monster_seed if enable_monsters else "",
+                    "algorithm": alg_name,
+                    "success": snapshot.success,
+                    "elapsed": f"{snapshot.elapsed:.6f}",
+                    "expanded": snapshot.expanded,
+                    "time_steps": snapshot.time_step,
+                    "path_length": path_length,
+                })
+
+    if args.csv_output:
+        import csv
+
+        fieldnames = [
+            "run",
+            "scenario",
+            "base_seed",
+            "door_seed",
+            "monster_seed",
+            "algorithm",
+            "success",
+            "elapsed",
+            "expanded",
+            "time_steps",
+            "path_length",
+        ]
+        with open(args.csv_output, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+        print(f"\nWrote {len(rows)} rows to {args.csv_output}")
 
 
 def prompt_for_mode():
@@ -712,19 +898,19 @@ def prompt_for_mode():
     return "visual" if response.startswith("y") else "cli"
 
 
-def build_door_config(args) -> DoorConfig:
+def build_door_config(args, door_seed: Optional[int]) -> DoorConfig:
     return DoorConfig(
         deterministic=args.deterministic,
-        seed=args.seed,
+        seed=door_seed,
         count=args.door_count,
     )
 
 
-def build_monster_config(args) -> MonsterConfig:
+def build_monster_config(args, monster_seed: Optional[int]) -> MonsterConfig:
     return MonsterConfig(
         count=args.monster_count,
         step_interval=args.monster_interval,
-        seed=args.seed,
+        seed=monster_seed,
     )
 
 
@@ -737,10 +923,15 @@ def parse_args():
     parser.add_argument("--extra-links", type=int, default=6, help="Additional corridors to carve after generation to create multiple paths.")
     parser.add_argument("--tile-size", type=int, default=24, help="Base tile size for visual mode; auto-scales to fit the screen.")
     parser.add_argument("--seed", type=int, default=None, help="Seed for maze and door generation (default: random).")
+    parser.add_argument("--base-seed", type=int, default=None, help="Explicit base seed for maze generation.")
+    parser.add_argument("--door-seed", type=int, default=None, help="Explicit seed for door generation.")
+    parser.add_argument("--monster-seed", type=int, default=None, help="Explicit seed for monster generation.")
     parser.add_argument("--deterministic", action="store_true", help="Use deterministic door timing.")
     parser.add_argument("--door-count", type=int, default=6, help="Number of doors to place when enabled.")
     parser.add_argument("--monster-count", type=int, default=1, help="Number of patrolling monsters when enabled.")
     parser.add_argument("--monster-interval", type=int, default=1, help="Monster step interval (time steps between moves).")
+    parser.add_argument("--runs", type=int, default=1, help="Number of runs to execute in CLI mode.")
+    parser.add_argument("--csv-output", type=str, default=None, help="Path to write CSV metrics.")
     return parser.parse_args()
 
 

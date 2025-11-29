@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Pygame-based visualization for the maze generators/solvers."""
+#Pygame visualization for mazes+algorithms
 
 from __future__ import annotations
 
@@ -7,7 +6,7 @@ import pygame
 
 
 class MazeVisualizer:
-    """Displays maze solver progress using pygame."""
+    #For maze solver progress using pygame
 
     def __init__(
         self,
@@ -20,6 +19,7 @@ class MazeVisualizer:
         tile_size=24,
         stats_height=120,
         max_cols=3,
+        title_suffix="",
     ):
         self.maze = maze
         self.doors = doors
@@ -30,51 +30,57 @@ class MazeVisualizer:
         self.tile_size = tile_size
         self.stats_height = stats_height
         self.max_cols = max_cols
+        self.title_suffix = title_suffix
 
     def _cell_to_grid(self, x, y):
         return 2 * x + 1, 2 * y + 1
 
-    def _compute_layout(self, grid_cols, grid_rows, num_visualizers):
-        pygame.display.init()
-        display_info = pygame.display.Info()
-        usable_w = max(320, display_info.current_w - 80)
-        usable_h = max(240, display_info.current_h - 120)
-
-        num_cols = min(self.max_cols, num_visualizers)
+    def _compute_layout(self, grid_cols, grid_rows, num_visualizers, container_w, container_h):
+        num_cols = min(self.max_cols, max(1, num_visualizers))
         num_rows = (num_visualizers + num_cols - 1) // num_cols
 
-        max_tile_w = usable_w // (grid_cols * num_cols)
-        max_tile_h = max(1, (usable_h - self.stats_height * num_rows) // (grid_rows * num_rows))
-        tile_size = max(4, min(self.tile_size, max_tile_w, max_tile_h))
+        usable_w = max(320, container_w - 16)
+        usable_h = max(240, container_h - 16)
 
-        stats_height = max(70, int(self.stats_height * (tile_size / self.tile_size)))
+        tile_size = self.tile_size
+        stats_height = self.stats_height
+        for _ in range(4):
+            max_tile_w = max(4, usable_w // (grid_cols * num_cols))
+            max_tile_h = max(4, (usable_h - stats_height * num_rows) // (grid_rows * num_rows))
+            tile_size = max(4, min(max_tile_w, max_tile_h))
+            line_height = max(16, int(18 * tile_size / 24))
+            stats_height = max(70, line_height * 6)
+
         view_width = grid_cols * tile_size
         panel_height = grid_rows * tile_size + stats_height
-        screen_width = view_width * num_cols
-        screen_height = panel_height * num_rows
-
-        return tile_size, stats_height, view_width, panel_height, screen_width, screen_height, num_cols, num_rows
+        return tile_size, stats_height, view_width, panel_height, num_cols, num_rows
 
     def run(self):
         grid = self.maze.to_grid()
         grid_rows = len(grid)
         grid_cols = len(grid[0])
 
-        tile_size, stats_height, view_width, panel_height, screen_width, screen_height, num_cols, num_rows = (
-            self._compute_layout(grid_cols, grid_rows, len(self.solver_factories))
-        )
-
         pygame.init()
-        screen = pygame.display.set_mode((screen_width, screen_height))
-        pygame.display.set_caption("Time-dependent Maze Solvers")
-        font = pygame.font.SysFont(None, max(14, int(18 * tile_size / 24)))
+        display_info = pygame.display.Info()
+        default_w = max(640, int(display_info.current_w * 0.9))
+        default_h = max(480, int(display_info.current_h * 0.8))
+        screen = pygame.display.set_mode((default_w, default_h), pygame.RESIZABLE)
+        pygame.display.set_caption(f"Time-dependent Maze Solvers{self.title_suffix}")
+        tile_size, stats_height, view_width, panel_height, num_cols, num_rows = (
+            self._compute_layout(grid_cols, grid_rows, len(self.solver_factories), *screen.get_size())
+        )
+        font_size = max(14, int(18 * tile_size / 24))
+        font = pygame.font.SysFont(None, font_size)
         clock = pygame.time.Clock()
+        fullscreen = False
+        last_window_size = screen.get_size()
 
         solver_visualizers = [
             factory()
             for factory in self.solver_factories
         ]
 
+        #color schemes for visual aspects
         colors = {
             "wall": (20, 20, 20),
             "floor": (230, 230, 230),
@@ -85,6 +91,9 @@ class MazeVisualizer:
             "monster": (255, 80, 130),
         }
 
+        line_height = max(16, int(18 * tile_size / 24))
+
+        #Draws semi transparent overlays for visited paths (helps visualize the algorithms working)
         def draw_alpha_rect(surface, color, rect, alpha):
             overlay = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
             overlay.fill((*color, alpha))
@@ -92,12 +101,33 @@ class MazeVisualizer:
 
         running = True
         while running:
-            clock.tick(60)
+
+            #Change this number to speed up or slow down the visualizer
+            #Lower numbers correspond to lower frames per second
+            #Higher numbers correspons to higher FPS, increase this number to have the visualizer run faster
+            clock.tick(5)
+            tile_size, stats_height, view_width, panel_height, num_cols, num_rows = (
+                self._compute_layout(grid_cols, grid_rows, len(self.solver_factories), *screen.get_size())
+            )
+            new_font_size = max(14, int(18 * tile_size / 24))
+            if new_font_size != font_size:
+                font_size = new_font_size
+                font = pygame.font.SysFont(None, font_size)
             for event in pygame.event.get():
                 if event.type == pygame.QUIT or (
                     event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE
                 ):
                     running = False
+                if event.type == pygame.VIDEORESIZE and not fullscreen:
+                    last_window_size = (event.w, event.h)
+                    screen = pygame.display.set_mode(last_window_size, pygame.RESIZABLE)
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_f:
+                    fullscreen = not fullscreen
+                    if fullscreen:
+                        display_info = pygame.display.Info()
+                        screen = pygame.display.set_mode((display_info.current_w, display_info.current_h), pygame.FULLSCREEN)
+                    else:
+                        screen = pygame.display.set_mode(last_window_size, pygame.RESIZABLE)
 
             for solver in solver_visualizers:
                 solver.advance()
@@ -206,29 +236,32 @@ class MazeVisualizer:
                         )
                         draw_alpha_rect(screen, colors["monster"], rect, 240)
 
-                stats_rect = pygame.Rect(
-                    offset_x,
-                    offset_y + grid_rows * tile_size,
-                    view_width,
-                    stats_height,
-                )
-                pygame.draw.rect(screen, (25, 25, 25), stats_rect)
-
+                path_len = len(snapshot.path) if snapshot.path else "-"
                 lines = [
                     f"{solver.name}",
                     f"elapsed: {snapshot.elapsed:.2f}s",
                     f"success: {snapshot.success}",
                     f"expanded: {snapshot.expanded}",
                     f"time step: {snapshot.time_step}",
-                    f"path length: {len(snapshot.path) if snapshot.path else '-'}",
+                    f"path length: {path_len}",
                 ]
+                pad = 6
+                overlay_height = line_height * len(lines) + pad * 2
+                stats_rect = pygame.Rect(
+                    offset_x,
+                    offset_y + grid_rows * tile_size,
+                    view_width,
+                    max(stats_height, overlay_height),
+                )
+                pygame.draw.rect(screen, (25, 25, 25), stats_rect)
+
                 for i, text in enumerate(lines):
                     surface = font.render(text, True, (235, 235, 235))
                     screen.blit(
                         surface,
                         (
-                            offset_x + 8,
-                            offset_y + grid_rows * tile_size + 8 + i * max(16, int(18 * tile_size / 24)),
+                            stats_rect.x + pad,
+                            stats_rect.y + pad + i * line_height,
                         ),
                     )
 
